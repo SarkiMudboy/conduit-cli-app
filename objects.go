@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/lib/pq"
@@ -30,13 +32,13 @@ type User struct {
 
 // stores details of a file share
 type Share struct {
-	Id int
-	From *User
-	To *User
-	File *Object
-	Note string
-	Drive *Drive
-	Sent time.Time
+	Id int `json:"id"`
+	From *User `json:"from"`
+	To *User `json:"user"`
+	File *Object `json:"object"`
+	Note string `json:"note"`
+	Drive *Drive `json:"drive"`
+	Sent time.Time `json:"sent"`
 }
 
 // represents a cloud: shared/personal
@@ -70,24 +72,26 @@ func (drive *Drive) Manager(action string) (err error) {
 	switch action {
 	case "create":
 		err = Db.QueryRow(
-			"insert into drives (name, is_personal, owner_id, bucket_id, created_at, updated_at) values $1, $2, $3 returning id", 
+			"insert into drives (name, is_personal, owner_id, bucket_id, created_at) values ($1, $2, $3, $4, $5) returning id", 
 			drive.Name, drive.IsPersonal, drive.Owner.Id, drive.Bucket.Id, timestamp).Scan(&drive.Id)
 		
 		// add the drive id to the owner's drive in the db
 		update_query := fmt.Sprintf("update users set drives = drives || '{%d}' where id=$1", drive.Id)
-		_ = Db.QueryRow(update_query, drive.Owner.Id)
+		_, err = Db.Exec(update_query, drive.Owner.Id)
 
 		// add the owner to the membas of the drive
-		updateMemberQuery := fmt.Sprintf("update users set members = members || {%d} where id=$1", drive.Owner.Id)
-		_ = Db.QueryRow(updateMemberQuery, drive.Id)
+		updateMemberQuery := fmt.Sprintf("update drives set members = members || '{%d}' where id=$1", drive.Owner.Id)
+		_, err = Db.Exec(updateMemberQuery, drive.Id)
 
 	case "retrieve":
 
 		user := User{}
 		bucket := Bucket{}
+
+		var members []interface{}
 		members_id := new([]interface{})
-		members := []*User{}
-		files := []*Object{}
+
+		var files []*Object
 
 		err = Db.QueryRow("select name, is_personal, members, owner_id, bucket_id, created_at, updated_at from objects where id=$1", drive.Id).Scan(
 			&drive.Name, &drive.IsPersonal, pq.Array(members_id), &user.Id, &bucket.Id, &drive.CreatedAt, &drive.UpdatedAt,
@@ -100,26 +104,13 @@ func (drive *Drive) Manager(action string) (err error) {
 		drive.Bucket = &bucket
 
 		query := "select id, name, email, created_at from users where id in("
-		for i := range *members_id{
+		members, _ = getObjectsByIds(query, User{}, members_id)
 
-			if i > 0 {
-				query += ","
+		for _, user := range members {
+			if u, ok := user.(*User); ok {
+				drive.Members = append(drive.Members, u)
 			}
-			query += fmt.Sprintf("$%d", i+1)
 		}
-		query += ")"
-
-		rows, err := Db.Queryx(query, *members_id...)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			user := User{}
-			rows.StructScan(&user)
-			members = append(members, &user)
-		}
-
-		drive.Members = members
 
 		object_rows, err := Db.Queryx("select id, name, is_dir, created_at, updated_at from objects where drive_id=$1", drive.Id)
 		if err != nil {
@@ -140,7 +131,8 @@ func (drive *Drive) Manager(action string) (err error) {
 
 	case "delete":
 		_, err = Db.Exec("delete from users where id=$1", drive.Id)
-	
+	default: 
+		return errors.New("invalid command")
 	}
 	
 	return
@@ -173,6 +165,8 @@ func (object *Object) Manager(action string) (err error) {
 
 	case "delete":
 		_, err = Db.Exec("delete from objects where id=$1", object.Id)
+	default: 
+		return errors.New("invalid command")
 	}
 
 	return
@@ -186,50 +180,62 @@ func (user *User) Manager(action string) (err error) {
 	case "create":
 
 		err = Db.QueryRow(
-			"insert into users (name, email, created_at) values $1, $2, $3 returning id", 
-			user.Name, user.Email, timestamp).Scan(&user.Id)
+			"insert into users (name, username, email, password, created_at) values ($1, $2, $3, $4, $5) returning id", 
+			user.Name, user.UserName, user.Email, user.Password, timestamp).Scan(&user.Id)
 
 	case "retrieve":
 
-		drives := *new([]*Drive)
+		var drives []interface{}
 		drives_id := new([]interface{})
+		shares_id := new([]interface{})
+		friends_id := new([]interface{})
 
-		err = Db.QueryRow("select id, name, email, drives, created_at, updated_at from users where id=$1", user.Id).Scan(&user.Id, 
-		&user.Name, &user.Email, pq.Array(&drives_id), &user.CreatedAt, &user.UpdatedAt)
+		err = Db.QueryRow(
+			"select id, name, username, email, password, inbox, drives, friends, created_at, updated_at from users where id=$1", user.Id).Scan(
+				&user.Id, &user.Name, &user.UserName, &user.Email, &user.Password, pq.Array(&shares_id), pq.Array(&drives_id), 
+					pq.Array(&friends_id), &user.CreatedAt, &user.UpdatedAt)
 		if err != nil {
 			return err
 		}
 		
 		query := "select id, name, is_personal, created_at from drives where id in("
-		for i := range *drives_id{
-
-			if i > 0 {
-				query += ","
+		drives, _ = getObjectsByIds(query, Drive{}, drives_id)
+		for _, drive := range drives {
+			if d, ok := drive.(*Drive); ok {
+				user.Drives = append(user.Drives, d)
 			}
-			query += fmt.Sprintf("$%d", i+1)
-		}
-		query += ")"
-
-		rows, err := Db.Queryx(query, *drives_id...)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			drive := Drive{}
-			rows.StructScan(&drive)
-			drives = append(drives, &drive)
 		}
 
-		user.Drives = drives
+		query = "select id, name, username from users where id in("
+		friends, _ := getObjectsByIds(query, User{}, friends_id)
+		for _, friend := range friends {
+			if u, ok := friend.(*User); ok {
+				user.Friends = append(user.Friends, u)
+			}
+		}
 
 	case "update": 
-		_, err = Db.Exec("update users set name=$2 email=$3 updated_at=$4 where id=$1", user.Id, user.Name, user.Email, timestamp)
+		_, err = Db.Exec("update users set name=$2 username=$3 email=$4 updated_at=$5 where id=$1", user.Id, user.Name, user.UserName, user.Email, timestamp)
 
 	case "delete":
 		_, err = Db.Exec("delete from users where id=$1", user.Id)
+	default: 
+		return errors.New("invalid command")
 	}
 
 	return 
+}
+
+
+func (user *User) GetObjectByField(fieldname string) error {
+	// check to see if field exists
+	u := reflect.ValueOf(user).Elem()
+	field := u.FieldByName(fieldname)
+	if !field.IsValid() {
+		return errors.New("invalid field")
+	}
+	query := fmt.Sprintf("select id, name, email, password, inbox, drives, friends, created_at, updated_at from users where %s=$1", fieldname)
+	return Db.QueryRowx(query, field.Interface()).StructScan(&user)
 }
 
 
@@ -239,7 +245,7 @@ func (bucket *Bucket) Manager(action string) (err error) {
 	switch action {
 	case "create":
 		err = Db.QueryRow(
-			"insert into buckets (name, url, created_at) values $1, $2, $3 returning id", 
+			"insert into buckets (name, url, created_at) values ($1, $2, $3) returning id", 
 			bucket.Name, bucket.URL, timestamp).Scan(&bucket.Id)
 
 	case "retrieve":
@@ -256,7 +262,26 @@ func (bucket *Bucket) Manager(action string) (err error) {
 
 	case "delete":
 		_, err = Db.Exec("delete from buckets where id=$1", bucket.Id)
+	default: 
+		return errors.New("invalid command")
 	}
 
+	return
+}
+
+
+func (share *Share) Manager(action string) (err error) {
+	switch action {
+	case "create":
+		err = Db.QueryRow("insert into shares (from_user, to_user, file, note, drive) values ($1, $2, $3, $4, $5) returning id", 
+		share.From, share.To, share.File.Id, share.Note, share.Drive.Id).Scan(&share.Id)
+
+		// add the file to the user's inbox
+		q := fmt.Sprintf("update users set inbox = inbox || '{%d}' where id=$1", share.Id)
+		_, err = Db.Exec(q, share.To.Id)
+
+	default: 
+		return errors.New("invalid command")
+	}
 	return
 }
