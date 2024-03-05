@@ -6,10 +6,13 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/lib/pq"
 )
 
 type Bucket struct {
+	Db *sqlx.DB
 	Id       int
 	Name string
 	URL  string
@@ -18,6 +21,7 @@ type Bucket struct {
 }
 
 type User struct {
+	Db *sqlx.DB
 	Id       int
 	Name string
 	UserName string
@@ -32,6 +36,7 @@ type User struct {
 
 // stores details of a file share
 type Share struct {
+	Db *sqlx.DB
 	Id int `json:"id"`
 	From *User `json:"from"`
 	To *User `json:"user"`
@@ -43,6 +48,7 @@ type Share struct {
 
 // represents a cloud: shared/personal
 type Drive struct {
+	Db *sqlx.DB
 	Id       int
 	Name string
 	IsPersonal bool
@@ -56,6 +62,7 @@ type Drive struct {
 
 // can represent a file or a folder (if its a folder: IsDir is true)
 type Object struct {
+	Db *sqlx.DB
 	Id       int
 	Name string
 	IsDir bool
@@ -71,17 +78,17 @@ func (drive *Drive) Manager(action string) (err error) {
 
 	switch action {
 	case "create":
-		err = Db.QueryRow(
+		err = drive.Db.QueryRowx(
 			"insert into drives (name, is_personal, owner_id, bucket_id, created_at) values ($1, $2, $3, $4, $5) returning id", 
-			drive.Name, drive.IsPersonal, drive.Owner.Id, drive.Bucket.Id, timestamp).Scan(&drive.Id)
+			drive.Name, drive.IsPersonal, drive.Owner.Id, drive.Bucket.Id, timestamp).StructScan(&drive)
 		
 		// add the drive id to the owner's drive in the db
 		update_query := fmt.Sprintf("update users set drives = drives || '{%d}' where id=$1", drive.Id)
-		_, err = Db.Exec(update_query, drive.Owner.Id)
+		_, err = drive.Db.Exec(update_query, drive.Owner.Id)
 
 		// add the owner to the membas of the drive
 		updateMemberQuery := fmt.Sprintf("update drives set members = members || '{%d}' where id=$1", drive.Owner.Id)
-		_, err = Db.Exec(updateMemberQuery, drive.Id)
+		_, err = drive.Db.Exec(updateMemberQuery, drive.Id)
 
 	case "retrieve":
 
@@ -93,7 +100,7 @@ func (drive *Drive) Manager(action string) (err error) {
 
 		var files []*Object
 
-		err = Db.QueryRow("select name, is_personal, members, owner_id, bucket_id, created_at, updated_at from objects where id=$1", drive.Id).Scan(
+		err = drive.Db.QueryRowx("select name, is_personal, members, owner_id, bucket_id, created_at, updated_at from objects where id=$1", drive.Id).Scan(
 			&drive.Name, &drive.IsPersonal, pq.Array(members_id), &user.Id, &bucket.Id, &drive.CreatedAt, &drive.UpdatedAt,
 		)
 		if err != nil {
@@ -112,7 +119,7 @@ func (drive *Drive) Manager(action string) (err error) {
 			}
 		}
 
-		object_rows, err := Db.Queryx("select id, name, is_dir, created_at, updated_at from objects where drive_id=$1", drive.Id)
+		object_rows, err := drive.Db.Queryx("select id, name, is_dir, created_at, updated_at from objects where drive_id=$1", drive.Id)
 		if err != nil {
 			return err
 		}
@@ -126,11 +133,11 @@ func (drive *Drive) Manager(action string) (err error) {
 		drive.Files = files
 
 	case "update": 
-		_, err = Db.Exec("update drives set name=$2, is_personal=$3, owner_id=$4, bucket_id=$5, updated_at=$6 where id=$1", 
+		_, err = drive.Db.Exec("update drives set name=$2, is_personal=$3, owner_id=$4, bucket_id=$5, updated_at=$6 where id=$1", 
 		drive.Name, drive.IsPersonal, drive.Owner.Id, drive.Bucket.Id, timestamp)
 
 	case "delete":
-		_, err = Db.Exec("delete from users where id=$1", drive.Id)
+		_, err = drive.Db.Exec("delete from users where id=$1", drive.Id)
 	default: 
 		return errors.New("invalid command")
 	}
@@ -143,7 +150,7 @@ func (object *Object) Manager(action string) (err error) {
 
 	switch action {
 	case "create":
-		err = Db.QueryRow(
+		err = object.Db.QueryRowx(
 			"insert into objects (name, is_dir, drive_id, created_at) values $1, $2, $3 returning id", 
 			object.Name, object.IsDir, object.Drive.Id, timestamp).Scan(&object.Id)
 
@@ -151,7 +158,7 @@ func (object *Object) Manager(action string) (err error) {
 
 		drive := Drive{}
 
-		err = Db.QueryRow("select name, is_dir, drive_id, created_at, updated_at from objects where id=$1", object.Id).Scan(
+		err = object.Db.QueryRowx("select name, is_dir, drive_id, created_at, updated_at from objects where id=$1", object.Id).Scan(
 			&object.Name, &object.IsDir, &drive.Id, &object.CreatedAt, &object.UpdatedAt,
 		)
 		if err != nil {
@@ -161,10 +168,10 @@ func (object *Object) Manager(action string) (err error) {
 		object.Drive = &drive
 
 	case "update": 
-		_, err = Db.Exec("update objects set name=$2 is_dir=$3 updated_at=$4 where id=$1", object.Id, object.Name, object.IsDir, timestamp)
+		_, err = object.Db.Exec("update objects set name=$2 is_dir=$3 updated_at=$4 where id=$1", object.Id, object.Name, object.IsDir, timestamp)
 
 	case "delete":
-		_, err = Db.Exec("delete from objects where id=$1", object.Id)
+		_, err = object.Db.Exec("delete from objects where id=$1", object.Id)
 	default: 
 		return errors.New("invalid command")
 	}
@@ -179,7 +186,7 @@ func (user *User) Manager(action string) (err error) {
 	switch action {
 	case "create":
 
-		err = Db.QueryRow(
+		err = user.Db.QueryRowx(
 			"insert into users (name, username, email, password, created_at) values ($1, $2, $3, $4, $5) returning id", 
 			user.Name, user.UserName, user.Email, user.Password, timestamp).Scan(&user.Id)
 
@@ -190,7 +197,7 @@ func (user *User) Manager(action string) (err error) {
 		shares_id := new([]interface{})
 		friends_id := new([]interface{})
 
-		err = Db.QueryRow(
+		err = user.Db.QueryRowx(
 			"select id, name, username, email, password, inbox, drives, friends, created_at, updated_at from users where id=$1", user.Id).Scan(
 				&user.Id, &user.Name, &user.UserName, &user.Email, &user.Password, pq.Array(&shares_id), pq.Array(&drives_id), 
 					pq.Array(&friends_id), &user.CreatedAt, &user.UpdatedAt)
@@ -215,10 +222,10 @@ func (user *User) Manager(action string) (err error) {
 		}
 
 	case "update": 
-		_, err = Db.Exec("update users set name=$2 username=$3 email=$4 updated_at=$5 where id=$1", user.Id, user.Name, user.UserName, user.Email, timestamp)
+		_, err = user.Db.Exec("update users set name=$2 username=$3 email=$4 updated_at=$5 where id=$1", user.Id, user.Name, user.UserName, user.Email, timestamp)
 
 	case "delete":
-		_, err = Db.Exec("delete from users where id=$1", user.Id)
+		_, err = user.Db.Exec("delete from users where id=$1", user.Id)
 	default: 
 		return errors.New("invalid command")
 	}
@@ -235,7 +242,7 @@ func (user *User) GetObjectByField(fieldname string) error {
 		return errors.New("invalid field")
 	}
 	query := fmt.Sprintf("select id, name, email, password, inbox, drives, friends, created_at, updated_at from users where %s=$1", fieldname)
-	return Db.QueryRowx(query, field.Interface()).StructScan(&user)
+	return user.Db.QueryRowx(query, field.Interface()).StructScan(&user)
 }
 
 
@@ -244,13 +251,13 @@ func (bucket *Bucket) Manager(action string) (err error) {
 
 	switch action {
 	case "create":
-		err = Db.QueryRow(
+		err = bucket.Db.QueryRowx(
 			"insert into buckets (name, url, created_at) values ($1, $2, $3) returning id", 
 			bucket.Name, bucket.URL, timestamp).Scan(&bucket.Id)
 
 	case "retrieve":
 
-		err = Db.QueryRow("select name, url, created_at, updated_at from buckets where id=$1", bucket.Id).Scan(
+		err = bucket.Db.QueryRowx("select name, url, created_at, updated_at from buckets where id=$1", bucket.Id).Scan(
 			&bucket.Name, &bucket.URL, &bucket.CreatedAt, &bucket.UpdatedAt,
 		)
 		if err != nil {
@@ -258,10 +265,10 @@ func (bucket *Bucket) Manager(action string) (err error) {
 		}
 
 	case "update": 
-		_, err = Db.Exec("update buckets set name=$2 is_dir=$3 updated_at=$4 where id=$1", bucket.Id, bucket.Name, bucket.URL, timestamp)
+		_, err = bucket.Db.Exec("update buckets set name=$2 is_dir=$3 updated_at=$4 where id=$1", bucket.Id, bucket.Name, bucket.URL, timestamp)
 
 	case "delete":
-		_, err = Db.Exec("delete from buckets where id=$1", bucket.Id)
+		_, err = bucket.Db.Exec("delete from buckets where id=$1", bucket.Id)
 	default: 
 		return errors.New("invalid command")
 	}
@@ -273,12 +280,12 @@ func (bucket *Bucket) Manager(action string) (err error) {
 func (share *Share) Manager(action string) (err error) {
 	switch action {
 	case "create":
-		err = Db.QueryRow("insert into shares (from_user, to_user, file, note, drive) values ($1, $2, $3, $4, $5) returning id", 
+		err = share.Db.QueryRow("insert into shares (from_user, to_user, file, note, drive) values ($1, $2, $3, $4, $5) returning id", 
 		share.From, share.To, share.File.Id, share.Note, share.Drive.Id).Scan(&share.Id)
 
 		// add the file to the user's inbox
 		q := fmt.Sprintf("update users set inbox = inbox || '{%d}' where id=$1", share.Id)
-		_, err = Db.Exec(q, share.To.Id)
+		_, err = share.Db.Exec(q, share.To.Id)
 
 	default: 
 		return errors.New("invalid command")

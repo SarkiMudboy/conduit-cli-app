@@ -46,13 +46,13 @@ func signUp(w http.ResponseWriter, r *http.Request) {
 	// store in Db
 	err = user.Manager("create")
 	if err != nil {
-		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
 	bucket := Bucket{Id:1}
 	err = bucket.Manager("retrieve")
 	if err != nil {
-		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 	fmt.Println(bucket)
 
@@ -67,7 +67,7 @@ func signUp(w http.ResponseWriter, r *http.Request) {
 
 	err = drive.Manager("create")
 	if err != nil {
-		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
 	// return username in response

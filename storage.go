@@ -20,7 +20,7 @@ func getConfig(regionName string) aws.Config {
 }
 
 
-func getPresignURL(cfg aws.Config, bucket, key string) (string, time.Duration) {
+func getPresignURL(cfg aws.Config, bucket, key string) (string, error) {
 	s3client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3client)
 	presignedurl, err := presignClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
@@ -28,15 +28,15 @@ func getPresignURL(cfg aws.Config, bucket, key string) (string, time.Duration) {
 		Key: aws.String(key),
 	})
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 	URLExpires := 15 * time.Minute
 	_ = s3.WithPresignExpires(URLExpires)
-	return presignedurl.URL, URLExpires
+	return presignedurl.URL,  nil
 }
 
 
-func putPresignURL(cfg aws.Config, bucket, key string) (string, time.Duration) {
+func putPresignURL(cfg aws.Config, bucket, key string) (string, error) {
 
 	s3client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3client)
@@ -48,11 +48,11 @@ func putPresignURL(cfg aws.Config, bucket, key string) (string, time.Duration) {
 	})
 
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 	URLExpires := 15 * time.Minute
 	_ = s3.WithPresignExpires(URLExpires)
-	return presignedurl.URL, URLExpires
+	return presignedurl.URL, nil
 }
 
 
