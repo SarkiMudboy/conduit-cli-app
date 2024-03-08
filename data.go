@@ -9,6 +9,7 @@ import (
 
 type Dependency struct {
 	Db *sqlx.DB
+	payload Payload
 }
 
 func init() {
@@ -22,22 +23,7 @@ func init() {
 		panic(err)
 	}
 
-	dependency = &Dependency{
-		Db: Db,
-	}
+	dependency.Db = Db
 }
-
-// restructure the DB (for all)
-/* 
-	drive_member table 
-	 - user id
-	 - drive id
-
-	DriveMember struct {}
-	|
-	v
-	Drive 
-	 - Members *Users -> drive_member.user
-*/
 
 

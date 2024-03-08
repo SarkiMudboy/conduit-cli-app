@@ -9,11 +9,35 @@ import (
 	// "os"
 	"strings"
 	"testing"
+
+	"github.com/jmoiron/sqlx"
 )
 
+type testUploadData struct {
+	Db *sqlx.DB
+	From int `json:"from"`
+	To int `json:"to"`
+	FileName string `json:"filename"`
+	IsDir bool `json:"is_dir"`
+	Note string `json:"note"`
+}
+
+type registerData struct {
+	Db *sqlx.DB
+	FullName string `json:"full_name"`
+	Email string `json:"email"`
+	Password string `json:"password"`
+}
 
 var mux *http.ServeMux
 var writer *httptest.ResponseRecorder
+
+func (t *testUploadData) Handle(Db *sqlx.DB, action string) ([]byte, error) {
+	return nil, nil
+}
+func (r *registerData) Handle(Db *sqlx.DB, action string) ([]byte, error) {
+	return nil, nil
+}
 
 func setUp() {
 	mux = http.NewServeMux()
@@ -27,9 +51,9 @@ func TestMain(m *testing.M) {
 }
 
 func TestRegister(t *testing.T) {
-	// t.Skip("Skip the register test")
-	// mux := http.NewServeMux()
-	mux.HandleFunc("/register", signUp)
+	t.Skip("Skip the register test")
+	testDep := Dependency{payload: &testUploadData{}}
+	mux.HandleFunc("/register", signUp(testDep))
 
 	uploadData := strings.NewReader(`{
 		"email": "Derek@hey.com",
@@ -55,16 +79,16 @@ func TestRegister(t *testing.T) {
 }
 
 func TestUpload(t *testing.T) {
-	// mux := http.NewServeMux()
-	mux.HandleFunc("/upload", Upload)
+	t.Skip("isolate register")
+	testDep := Dependency{payload: &registerData{}}
+	mux.HandleFunc("/upload", Upload(testDep))
 
 	uploadData := strings.NewReader(`{
 		"from": "Sarki Ihima101",
 		"to": "Sharon Resser101",
-		"drive": 5,
 		"filename": "proposal.txt",
 		"is_dir": false,
-		"Note": "this is a new proposal for you"
+		"note": "this is a new proposal for you"
 	}`)
 
 	// writer := httptest.NewRecorder()

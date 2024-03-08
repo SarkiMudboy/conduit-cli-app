@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,17 +14,38 @@ import (
 
 var conf aws.Config
 var port = ":8000"
-var dependency *Dependency
+var dependency Dependency
 
-type UploadData struct {
-	From string `json:"from"`
-	To string `json:"to"`
-	Drive int `json:"drive"`
+type Payload interface {
+	Handle(*sqlx.DB, string) ([]byte, error)
+}
+
+type uploadData struct {
+	Db *sqlx.DB
+	From int `json:"from"`
+	To int `json:"to"`
 	FileName string `json:"filename"`
 	IsDir bool `json:"is_dir"`
 	Note string `json:"note"`
 }
 
+func(u uploadData) Handle(db *sqlx.DB, action string) (url []byte, err error) {
+	switch action {
+	case "POST":
+		// check cache here...abstrct into Handle
+		u.Db = db
+		presign_url, err := putPresignURL(conf, "conduitcli-test-bucket", u.FileName)
+		url = []byte(fmt.Sprintf(`{"presign_url": "%s"}`, presign_url))
+		if err != nil {
+			return nil, err
+		}
+		// save to cache...
+		err = SaveFileToCache(u)
+		// goroutine that waits for the time to elapse and queries AWS for file
+		
+	}
+	return
+}
 
 func init() {
 	conf = getConfig("us-east-1")
@@ -32,10 +54,10 @@ func init() {
 func Upload(d Dependency) http.HandlerFunc {
 
 	return func (w http.ResponseWriter, r *http.Request) {
-		// data in -> filename, from_username (user), to_username, note, drive, is_dir 
+		// data in -> filename, from_username (drive_member), to_username, note, drive, is_dir 
 		
 		fmt.Printf("%s - %s\n", r.Method, r.URL)
-		uploadData := new(UploadData)
+		upload := d.payload
 		data := make([]byte, r.ContentLength)
 
 		_, err := r.Body.Read(data)
@@ -47,33 +69,23 @@ func Upload(d Dependency) http.HandlerFunc {
 
 		defer r.Body.Close()
 
-		err = json.Unmarshal(data, uploadData)
+		err = json.Unmarshal(data, &upload)
 		if err != nil {
 			log.Println("Cannot extract json data: ", err)
 			return
 		}
-		// check cache here...
 
-		presign_url, err := putPresignURL(conf, "conduitcli-test-bucket", uploadData.FileName)
-		url := []byte(fmt.Sprintf(`{"presign_url": "%s"}`, presign_url))
-
+		url, err := upload.Handle(d.Db, r.Method)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-
-		// save to cache...
-		err = SaveFileToCache(d.Db, *uploadData)
-		// goroutine that waits for the time to elapse and queries AWS for file
-		if err!= nil {
-			w.WriteHeader(400)
-			w.Write([]byte(err.Error()))
-		}
-
+		
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		w.Write(url)
 	}
 }
+
 
 // func WaitForUpload(wait time.Duration, objectData) {
 	// time.Sleep(wait)
@@ -81,32 +93,59 @@ func Upload(d Dependency) http.HandlerFunc {
 // }
 
 
-func SaveFileToCache(Db *sqlx.DB, data UploadData) error {
+func SaveFileToCache(data uploadData) error {
 	// save to cache
 	// get users
-	from := User{
+	Db := data.Db
+	from := DriveMember{
 		Db: Db,
-		UserName: data.From,
+		Id: data.From,
 	}
-	to := User{
+	to := DriveMember{
 		Db: Db,
-		UserName: data.To,
+		Id: data.To,
+	}
+	// fix to see if members and drive do not exist
+	err := from.Manager("retrieve")
+	if err == sql.ErrNoRows{
+		from_user := User{Db: Db, Id: from.Id}
+		to_user := User{Db: Db, Id: to.Id}
+		err = from_user.Manager("retrieve")
+		if err != nil {
+			return err
+		}
+		err = to_user.Manager("retrieve")
+		if err != nil {
+			return err
+		}
+
+		drive := Drive{
+			Db: Db,
+			Name: from_user.UserName + to.User.UserName + " -drive",
+			IsPersonal: false,
+			Owner: &from_user,
+			Bucket: &Bucket{Id: 1},
+		}
+		_ = drive.Manager("create")
+
+		from.User = &from_user
+		from.Drive = &drive
+		to.User = &to_user
+		to.Drive = &drive
+
+		from.Manager("create")
+		to.Manager("create")
+
+	} else {
+		_ = to.Manager("retrieve")
 	}
 
-	from.GetObjectByField("username")
-	to.GetObjectByField("username")
-
-	drive := Drive{
-		Db: Db,
-		Id: data.Drive,
-	}
-	_ = drive.Manager("retrieve")
-
+	drive := from.Drive
 	object := Object{
 		Db: Db,
 		Name: data.FileName,
 		IsDir: data.IsDir,
-		Drive: &drive,
+		Drive: drive,
 	}
 
 	share := Share{
@@ -115,9 +154,9 @@ func SaveFileToCache(Db *sqlx.DB, data UploadData) error {
 		To: &to,
 		File: &object,
 		Note: data.Note,
-		Drive: &drive,
+		Saved: false,
 	}
-	err := share.SaveToCache()
+	err = share.SaveToCache()
 	if err != nil {
 		return err
 	}
@@ -171,10 +210,10 @@ func main() {
 		Addr: port,
 		Handler: mux,
 	}
-	mux.HandleFunc("/upload", Upload(*dependency))
+	mux.HandleFunc("/upload", Upload(dependency))
 	mux.HandleFunc("/download", Download)
 
-	mux.HandleFunc("/register", signUp)
+	mux.HandleFunc("/register", signUp(dependency))
 	
 	err := server.ListenAndServe()
 	if err != nil {

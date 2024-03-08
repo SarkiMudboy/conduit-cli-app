@@ -1,15 +1,18 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
 	"time"
 
 	"github.com/jmoiron/sqlx"
-
-	"github.com/lib/pq"
 )
+
+type Model interface {
+	Manager(string) error
+}
 
 type Bucket struct {
 	Db *sqlx.DB
@@ -29,7 +32,6 @@ type User struct {
 	Password string
 	Inbox []*Share
 	Drives []*Drive
-	Friends []*User
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -38,11 +40,11 @@ type User struct {
 type Share struct {
 	Db *sqlx.DB
 	Id int `json:"id"`
-	From *User `json:"from"`
-	To *User `json:"user"`
+	From *DriveMember `json:"from"`
+	To *DriveMember `json:"to"`
 	File *Object `json:"object"`
 	Note string `json:"note"`
-	Drive *Drive `json:"drive"`
+	Saved bool `json:"saved"`
 	Sent time.Time `json:"sent"`
 }
 
@@ -53,9 +55,19 @@ type Drive struct {
 	Name string
 	IsPersonal bool
 	Owner *User
-	Members []*User
+	Members []*DriveMember
 	Files []*Object
 	Bucket   *Bucket
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// A member of a Drive
+type DriveMember struct {
+	Db *sqlx.DB
+	Id int
+	User *User
+	Drive *Drive
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -82,42 +94,40 @@ func (drive *Drive) Manager(action string) (err error) {
 			"insert into drives (name, is_personal, owner_id, bucket_id, created_at) values ($1, $2, $3, $4, $5) returning id", 
 			drive.Name, drive.IsPersonal, drive.Owner.Id, drive.Bucket.Id, timestamp).StructScan(&drive)
 		
-		// add the drive id to the owner's drive in the db
-		update_query := fmt.Sprintf("update users set drives = drives || '{%d}' where id=$1", drive.Id)
-		_, err = drive.Db.Exec(update_query, drive.Owner.Id)
+		// // add the drive id to the owner's drive in the db
+		// update_query := fmt.Sprintf("update users set drives = drives || '{%d}' where id=$1", drive.Id)
+		// _, err = drive.Db.Exec(update_query, drive.Owner.Id)
 
 		// add the owner to the membas of the drive
-		updateMemberQuery := fmt.Sprintf("update drives set members = members || '{%d}' where id=$1", drive.Owner.Id)
-		_, err = drive.Db.Exec(updateMemberQuery, drive.Id)
+		// updateMemberQuery := fmt.Sprintf("update drives set members = members || '{%d}' where id=$1", drive.Owner.Id)
+		// _, err = drive.Db.Exec(updateMemberQuery, drive.Id)
 
 	case "retrieve":
-
 		user := User{}
 		bucket := Bucket{}
-
-		var members []interface{}
-		members_id := new([]interface{})
-
+		var members []*DriveMember
 		var files []*Object
 
-		err = drive.Db.QueryRowx("select name, is_personal, members, owner_id, bucket_id, created_at, updated_at from objects where id=$1", drive.Id).Scan(
-			&drive.Name, &drive.IsPersonal, pq.Array(members_id), &user.Id, &bucket.Id, &drive.CreatedAt, &drive.UpdatedAt,
+		err = drive.Db.QueryRowx("select name, is_personal, owner_id, bucket_id, created_at, updated_at from objects where id=$1", drive.Id).Scan(
+			&drive.Name, &drive.IsPersonal, &user.Id, &bucket.Id, &drive.CreatedAt, &drive.UpdatedAt,
 		)
 		if err != nil {
 			return err
 		}
-		
+
+		err = user.Manager("retrieve")
+		err = bucket.Manager("retrieve")
 		drive.Owner = &user
 		drive.Bucket = &bucket
 
-		query := "select id, name, email, created_at from users where id in("
-		members, _ = getObjectsByIds(query, User{}, members_id)
+		rows, err := drive.Db.Queryx("select user_id, created_at, updated_at from drive_members where drive_id=$1", drive.Id)
 
-		for _, user := range members {
-			if u, ok := user.(*User); ok {
-				drive.Members = append(drive.Members, u)
-			}
+		for rows.Next() {
+			driveMember := DriveMember{Drive: drive}
+			rows.StructScan(&driveMember)
+			members = append(members, &driveMember)
 		}
+		drive.Members = members
 
 		object_rows, err := drive.Db.Queryx("select id, name, is_dir, created_at, updated_at from objects where drive_id=$1", drive.Id)
 		if err != nil {
@@ -125,7 +135,7 @@ func (drive *Drive) Manager(action string) (err error) {
 		}
 
 		for object_rows.Next() {
-			obj := Object{}
+			obj := Object{Drive: drive}
 			object_rows.StructScan(&obj)
 			files = append(files, &obj)
 		}
@@ -155,17 +165,13 @@ func (object *Object) Manager(action string) (err error) {
 			object.Name, object.IsDir, object.Drive.Id, timestamp).Scan(&object.Id)
 
 	case "retrieve":
-
-		drive := Drive{}
-
 		err = object.Db.QueryRowx("select name, is_dir, drive_id, created_at, updated_at from objects where id=$1", object.Id).Scan(
-			&object.Name, &object.IsDir, &drive.Id, &object.CreatedAt, &object.UpdatedAt,
+			&object.Name, &object.IsDir, &object.Drive.Id, &object.CreatedAt, &object.UpdatedAt,
 		)
 		if err != nil {
 			return err
 		}
-		
-		object.Drive = &drive
+		_ = object.Drive.Manager("retrieve")
 
 	case "update": 
 		_, err = object.Db.Exec("update objects set name=$2 is_dir=$3 updated_at=$4 where id=$1", object.Id, object.Name, object.IsDir, timestamp)
@@ -186,40 +192,52 @@ func (user *User) Manager(action string) (err error) {
 	switch action {
 	case "create":
 
-		err = user.Db.QueryRowx(
+		err = user.Db.QueryRow(
 			"insert into users (name, username, email, password, created_at) values ($1, $2, $3, $4, $5) returning id", 
 			user.Name, user.UserName, user.Email, user.Password, timestamp).Scan(&user.Id)
 
 	case "retrieve":
-
-		var drives []interface{}
-		drives_id := new([]interface{})
-		shares_id := new([]interface{})
-		friends_id := new([]interface{})
-
 		err = user.Db.QueryRowx(
-			"select id, name, username, email, password, inbox, drives, friends, created_at, updated_at from users where id=$1", user.Id).Scan(
-				&user.Id, &user.Name, &user.UserName, &user.Email, &user.Password, pq.Array(&shares_id), pq.Array(&drives_id), 
-					pq.Array(&friends_id), &user.CreatedAt, &user.UpdatedAt)
+			"select id, name, username, email, password, created_at, updated_at from users where id=$1", user.Id).StructScan(&user)
 		if err != nil {
 			return err
 		}
-		
-		query := "select id, name, is_personal, created_at from drives where id in("
-		drives, _ = getObjectsByIds(query, Drive{}, drives_id)
-		for _, drive := range drives {
-			if d, ok := drive.(*Drive); ok {
-				user.Drives = append(user.Drives, d)
+
+		rows, err := user.Db.Query("select drive_id from drive_members where user_id=$1", user.Id) 
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			// try to use goruotines here
+			var drive Drive
+			err = rows.Scan(&drive.Id)
+			if err != nil {
+				return err
 			}
+			_ = drive.Manager("retrieve")
+			user.Drives = append(user.Drives, &drive)
 		}
 
-		query = "select id, name, username from users where id in("
-		friends, _ := getObjectsByIds(query, User{}, friends_id)
-		for _, friend := range friends {
-			if u, ok := friend.(*User); ok {
-				user.Friends = append(user.Friends, u)
+		rows, err = user.Db.Query("select id, from_user, to_user, file, note, saved, sent from shares where saved=$1", false)
+		for rows.Next() {
+			var share Share
+			err = rows.Scan(&share.Id, &share.From.Id, &share.To.Id, &share.File.Id, &share.Note, &share.Saved, &share.Sent)
+			if err != nil {
+				return err
 			}
+			// use go routines for each manager here
+			_ = share.From.Manager("retrieve")
+			_ = share.To.Manager("retrieve")
+			_ = share.File.Manager("retrieve")
+			user.Inbox = append(user.Inbox, &share)
 		}
+		// query := "select id, name, is_personal, created_at from drives where id in("
+		// drives, _ = getObjectsByIds(query, Drive{}, drives_id)
+		// for _, drive := range drives {
+		// 	if d, ok := drive.(*Drive); ok {
+		// 		user.Drives = append(user.Drives, d)
+		// 	}
+		// }
 
 	case "update": 
 		_, err = user.Db.Exec("update users set name=$2 username=$3 email=$4 updated_at=$5 where id=$1", user.Id, user.Name, user.UserName, user.Email, timestamp)
@@ -278,17 +296,51 @@ func (bucket *Bucket) Manager(action string) (err error) {
 
 
 func (share *Share) Manager(action string) (err error) {
+	timestamp := time.Now()
+
 	switch action {
 	case "create":
-		err = share.Db.QueryRow("insert into shares (from_user, to_user, file, note, drive) values ($1, $2, $3, $4, $5) returning id", 
-		share.From, share.To, share.File.Id, share.Note, share.Drive.Id).Scan(&share.Id)
+		err = share.Db.QueryRow("insert into shares (from_user, to_user, file, note, saved, sent) values ($1, $2, $3, $4, $5) returning id", 
+		&share.From.Id, &share.To.Id, &share.File.Id, &share.Note, &share.Saved, &share.Sent).Scan(&share.Id)
 
-		// add the file to the user's inbox
-		q := fmt.Sprintf("update users set inbox = inbox || '{%d}' where id=$1", share.Id)
-		_, err = share.Db.Exec(q, share.To.Id)
+	case "retrieve":
+		err := share.Db.QueryRow("select from_user, to_user, file, note, saved, sent from shares where id=$1", share.Id).Scan(
+			&share.From.Id, &share.To.Id, &share.File.Id, &share.Note, &share.Saved, &share.Sent, 
+		)
+		if err != nil {
+			return err
+		}
 
+		err = share.From.Manager("retrieve")
+		err = share.To.Manager("retrieve")
+		_ = share.File.Manager("retrieve")
+
+	case "update": 
+		_, err = share.Db.Exec("update shares set note=$2 saved=$3 sent=$4 updated_at=$5 where id=$1", share.Id, share.Note, share.Saved, share.Sent, timestamp)
+
+	case "delete":
+		_, err = share.Db.Exec("delete from shares where id=$1", share.Id)
 	default: 
 		return errors.New("invalid command")
 	}
+	return
+}
+
+func (driveMember *DriveMember) Manager(action string) (err error) {
+	timestamp := time.Now()
+	switch action{
+	case "create":
+		err = driveMember.Db.QueryRow("insert into drive_members (user_id, drive_id, created_at) values ($1, $2, $3) returning id", driveMember.User.Id,
+			driveMember.Drive.Id, timestamp).Scan(&driveMember.Id)
+	case "retrieve":
+		 err = driveMember.Db.QueryRow("select user_id, drive_id, created_at, updated_at from drive_members where id=$1", driveMember.Id).Scan(
+			&driveMember.User.Id, &driveMember.Drive.Id, &driveMember.CreatedAt, &driveMember.UpdatedAt)
+		if err != nil || err == sql.ErrNoRows {
+			return
+		}
+		_ = driveMember.User.Manager("retrieve")
+		_ = driveMember.Drive.Manager("retrieve")
+	}
+	
 	return
 }

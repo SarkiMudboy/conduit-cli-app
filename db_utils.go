@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/jmoiron/sqlx"
 )
 
-// remember to add the db as a param
-func getObjectsByIds(query string, TargetObject interface{}, IdList *[]interface{}) (objects []interface{}, err error) {
+
+func getObjectsByIds(Db sqlx.DB, query string, TargetObject interface{}, IdList *[]interface{}) (objects []interface{}, err error) {
 	// utility for getting row entries provided a list of their ids
 	
 	for i := range *IdList{
